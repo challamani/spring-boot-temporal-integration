@@ -1,0 +1,16 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: payment-service
+
+temporal:
+  service-url: 127.0.0.1:7233
+  namespace: default
+
+logging:
+  level:
+    com.example.temporal: DEBUG
+    io.temporal: INFO
+

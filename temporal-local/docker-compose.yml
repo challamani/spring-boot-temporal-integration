@@ -1,0 +1,54 @@
+version: '3.8'
+
+networks:
+  temporal-network:
+    driver: bridge
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    networks:
+      - temporal-network
+    environment:
+      - POSTGRES_USER=temporal
+      - POSTGRES_PASSWORD=temporal
+      - POSTGRES_DB=temporal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: temporal
+    networks:
+      - temporal-network
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgres
+      - BIND_ON_IP=0.0.0.0
+      - TEMPORAL_BROADCAST_ADDRESS=127.0.0.1
+      - SKIP_SCHEMA_SETUP=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ADD THIS SERVICE BACK IN
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: temporal-ui
+    networks:
+      - temporal-network
+    ports:
+      - "8088:8080"  # We map host 8088 to the UI's 8080
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233 # Tells UI where the server is
+    depends_on:
+      - temporal

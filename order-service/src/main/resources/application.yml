@@ -1,0 +1,16 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: order-service
+
+temporal:
+  service-url: 127.0.0.1:7233   # Temporal frontend gRPC endpoint
+  namespace: default
+
+logging:
+  level:
+    com.example.temporal: DEBUG
+    io.temporal: INFO
+
