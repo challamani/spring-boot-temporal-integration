@@ -24,6 +24,7 @@
         <module>payment-service</module>
         <module>inventory-service</module>
         <module>logistics-service</module>
+        <module>load-testing</module>
     </modules>
 
     <properties>

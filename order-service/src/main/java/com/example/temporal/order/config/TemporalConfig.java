@@ -1,6 +1,7 @@
 package com.example.temporal.order.config;
 
 import com.example.temporal.common.constants.TaskQueues;
+import com.example.temporal.order.activity.FraudCheckActivityImpl;
 import com.example.temporal.order.workflow.OrderWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
@@ -21,6 +22,7 @@ import org.springframework.context.annotation.Configuration;
  *   <li>Connects to the Temporal frontend gRPC endpoint.
  *   <li>Creates a {@link WorkflowClient} used by the REST layer to start workflow executions.
  *   <li>Registers {@link OrderWorkflowImpl} as a workflow worker on {@code ORDER_TASK_QUEUE}.
+ *   <li>Registers {@link FraudCheckActivityImpl} as an activity worker on {@code ORDER_TASK_QUEUE}.
  * </ul>
  */
 @Configuration
@@ -55,13 +57,18 @@ public class TemporalConfig {
 
     /**
      * Starts the Temporal worker once the Spring context is fully initialized.
-     * The worker picks up {@code ORDER_TASK_QUEUE} tasks and executes {@link OrderWorkflowImpl}.
+     * The worker picks up {@code ORDER_TASK_QUEUE} tasks and executes:
+     * <ul>
+     *   <li>{@link OrderWorkflowImpl} – the saga workflow
+     *   <li>{@link FraudCheckActivityImpl} – the fraud-check activity (runs locally in order-service)
+     * </ul>
      */
     @Bean
     public ApplicationRunner temporalWorkerRunner(WorkerFactory workerFactory) {
         return (ApplicationArguments args) -> {
             Worker worker = workerFactory.newWorker(TaskQueues.ORDER_TASK_QUEUE);
             worker.registerWorkflowImplementationTypes(OrderWorkflowImpl.class);
+            worker.registerActivitiesImplementations(new FraudCheckActivityImpl());
             workerFactory.start();
         };
     }
