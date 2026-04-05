@@ -45,7 +45,21 @@ Temporal endpoints:
 - gRPC: `127.0.0.1:7233`
 - UI: `http://localhost:8088`
 
-### 2) Start each service (separate terminals)
+### 2) Bootstrap Maven (run once after cloning)
+
+The parent POM and `common` module must be installed into your local Maven repository before running any individual service. From the repository root:
+
+```bash
+# Step 1 — install the root/parent POM only (no child modules)
+mvn -N install
+
+# Step 2 — install the shared common module
+mvn -pl common install -DskipTests
+```
+
+You only need to repeat this if you change `common` or the parent `pom.xml`.
+
+### 3) Start each service (separate terminals)
 
 From the repository root:
 
@@ -65,7 +79,7 @@ mvn -pl inventory-service spring-boot:run
 mvn -pl logistics-service spring-boot:run
 ```
 
-### 3) Start an order workflow
+### 4) Start an order workflow
 
 ```bash
 curl -X POST http://localhost:8080/orders \
@@ -79,7 +93,7 @@ The response returns workflow identifiers immediately (async start), for example
 {"workflowId":"order-ORD-001","runId":"...","status":"STARTED"}
 ```
 
-### 4) Fetch workflow result
+### 5) Fetch workflow result
 
 ```bash
 curl http://localhost:8080/orders/order-ORD-001
