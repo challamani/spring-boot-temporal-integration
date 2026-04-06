@@ -141,14 +141,12 @@ public class OrderWorkflowImpl implements OrderWorkflow {
                 request.orderId(), request.productId(), request.quantity());
 
         InventoryResult result = inventoryActivity.reserveInventory(inventoryRequest);
-
         if (result.success()) {
             saga.addCompensation(() -> inventoryActivity.cancelReservation(inventoryRequest));
             log.info("Inventory reserved: orderId={}, reservationId={}", request.orderId(), result.reservationId());
         } else {
             log.warn("Inventory reservation failed: orderId={}, reason={}", request.orderId(), result.message());
         }
-
         return result;
     }
 
@@ -294,7 +292,6 @@ public class OrderWorkflowImpl implements OrderWorkflow {
         } else {
             log.warn("Shipment failed: orderId={}, reason={}", request.orderId(), result.message());
         }
-
         return result;
     }
 

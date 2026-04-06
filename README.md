@@ -87,7 +87,7 @@ mvn -pl logistics-service spring-boot:run
 ```bash
 curl -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
-  -d '{"orderId":"ORD-001","customerId":"CUST-1","productId":"PROD-001","quantity":2,"amount":500.99,"shippingAddress":"123 Main St"}'
+  -d '{"orderId":"ORD-001","customerId":"CUST-1","productId":"PROD-001","quantity":2,"amount":900.99,"shippingAddress":"123 Main St"}'
 ```
 
 The response returns workflow identifiers immediately (async start), for example:

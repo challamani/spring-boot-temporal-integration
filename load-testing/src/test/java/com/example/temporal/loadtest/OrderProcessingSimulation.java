@@ -21,8 +21,8 @@ import static io.gatling.javaapi.http.HttpDsl.*;
  * <ol>
  *   <li>{@code POST /orders} — starts a workflow with a unique UUID-based orderId</li>
  *   <li>Pauses to let workflows begin processing</li>
- *   <li>Polls {@code GET /orders/{workflowId}} in a retry loop until the workflow completes
- *       or max attempts are exhausted</li>
+ *   <li>{@code GET /orders/{workflowId}?timeout=30} — blocks server-side until the
+ *       workflow completes (or 30 s expires), then verifies {@code status: SUCCESS}</li>
  * </ol>
  *
  * <p>Every order uses {@code amount = 100}, which is safely below the $1,000
@@ -65,8 +65,7 @@ public class OrderProcessingSimulation extends Simulation {
     private static final int    TOTAL_REQUESTS  = Integer.getInteger("totalRequests",  30);
     private static final int    DURATION_SECS   = Integer.getInteger("durationSecs",   60);
     private static final int    POLL_PAUSE_SECS = Integer.getInteger("pollPauseSecs",  10);
-    private static final int    MAX_POLLS       = Integer.getInteger("maxPolls",       6);
-    private static final int    POLL_INTERVAL   = Integer.getInteger("pollInterval",   5);
+    private static final int    GET_TIMEOUT     = Integer.getInteger("getTimeout",     30);
 
     // ── HTTP protocol shared by all requests ────────────────────────────────
 
@@ -124,38 +123,16 @@ public class OrderProcessingSimulation extends Simulation {
             // ── 2. Initial pause — give workflows a head start ─────────────────
             .pause(Duration.ofSeconds(POLL_PAUSE_SECS))
 
-            // ── 3. Poll for the result with retries ────────────────────────────
-            //  - The GET endpoint returns 200 when the workflow is complete,
-            //    or 202 if it's still running. We retry on 202 up to MAX_POLLS times.
-            .exec(session -> session.set("pollCount", 0).set("orderDone", false))
-
-            .asLongAs(session -> !session.getBoolean("orderDone")
-                                 && session.getInt("pollCount") < MAX_POLLS)
-            .on(
-                    exec(
-                            http("GET /orders/{workflowId}")
-                                    .get("/orders/#{workflowId}?timeout=10")
-                                    .check(
-                                            status().saveAs("pollStatus")
-                                    )
-                                    // Only extract result fields when we get a 200
-                                    .checkIf(
-                                            (response, session) ->
-                                                    session.getString("pollStatus").equals("200")
-                                    ).then(
-                                            jsonPath("$.status").is("SUCCESS"),
-                                            jsonPath("$.orderId").is("#{orderId}")
-                                    )
-                    )
-                    .exec(session -> {
-                        String pollStatus = session.getString("pollStatus");
-                        int count = session.getInt("pollCount") + 1;
-                        boolean done = "200".equals(pollStatus);
-                        return session.set("pollCount", count).set("orderDone", done);
-                    })
-                    // Pause between retries (only if not done yet)
-                    .doIf(session -> !session.getBoolean("orderDone"))
-                    .then(pause(Duration.ofSeconds(POLL_INTERVAL)))
+            // ── 3. Fetch the result (server blocks until workflow completes) ───
+            //  The controller calls getResult(timeout, SECONDS) which blocks
+            //  server-side until the workflow finishes or the timeout expires.
+            //  - 200 = workflow completed  →  validate status=SUCCESS
+            //  - 202 = still running       →  counted as a failure (timeout too short)
+            .exec(
+                    http("GET /orders/{workflowId}")
+                            .get("/orders/#{workflowId}?timeout=" + GET_TIMEOUT)
+                            .check(status().is(200))
+                            .check(jsonPath("$.status").is("SUCCESS"))
             );
 
     // ── Load profile & assertions ───────────────────────────────────────────
