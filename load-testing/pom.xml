@@ -45,6 +45,14 @@
                 <version>${gatling-maven-plugin.version}</version>
                 <configuration>
                     <simulationClass>com.example.temporal.loadtest.OrderProcessingSimulation</simulationClass>
+                    <jvmArgs>
+                        <jvmArg>-DrampUsers=${rampUsers}</jvmArg>
+                        <jvmArg>-DrampSecs=${rampSecs}</jvmArg>
+                        <jvmArg>-DsteadyRate=${steadyRate}</jvmArg>
+                        <jvmArg>-DsteadySecs=${steadySecs}</jvmArg>
+                        <jvmArg>-DspikeUsers=${spikeUsers}</jvmArg>
+                        <jvmArg>-DgetTimeout=${getTimeout}</jvmArg>
+                    </jvmArgs>
                 </configuration>
             </plugin>
 
@@ -58,5 +66,49 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- Smoke: quick sanity check (~25 workflows) -->
+        <profile>
+            <id>smoke</id>
+            <properties>
+                <rampUsers>5</rampUsers>
+                <rampSecs>5</rampSecs>
+                <steadyRate>2</steadyRate>
+                <steadySecs>5</steadySecs>
+                <spikeUsers>5</spikeUsers>
+                <getTimeout>30</getTimeout>
+            </properties>
+        </profile>
+
+        <!-- Default: moderate parallel load (~350 workflows) -->
+        <profile>
+            <id>default-load</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <rampUsers>30</rampUsers>
+                <rampSecs>15</rampSecs>
+                <steadyRate>10</steadyRate>
+                <steadySecs>30</steadySecs>
+                <spikeUsers>20</spikeUsers>
+                <getTimeout>30</getTimeout>
+            </properties>
+        </profile>
+
+        <!-- Stress: heavy parallel load (~1,250 workflows) -->
+        <profile>
+            <id>stress</id>
+            <properties>
+                <rampUsers>50</rampUsers>
+                <rampSecs>10</rampSecs>
+                <steadyRate>20</steadyRate>
+                <steadySecs>60</steadySecs>
+                <spikeUsers>50</spikeUsers>
+                <getTimeout>45</getTimeout>
+            </properties>
+        </profile>
+    </profiles>
 </project>
 

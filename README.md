@@ -1,351 +1,152 @@
-# Spring Boot + Temporal Demo
+# Spring Boot + Temporal — Saga Order Processing
 
-This project is a **demo application** to explore core Temporal features with a saga-style order flow across multiple Spring Boot services.
+A multi-service order processing system demonstrating the **Saga pattern** orchestrated by [Temporal](https://temporal.io), with human-in-the-loop approval, workflow versioning, and Gatling load testing.
 
-## What this demo shows
+## Architecture — Saga Pattern with Temporal
 
-- Orchestrating a multi-step business process with a Temporal workflow.
-- Distributed task routing with dedicated Temporal task queues per service.
-- Saga compensation behavior on failures (rollback in reverse order).
-- Async workflow start from REST (`POST /orders`) and result retrieval (`GET /orders/{workflowId}`).
-- **Human-in-the-Loop** – workflow pauses for manual approval via Temporal Signals & Queries.
-- **Workflow Versioning** – safe evolution of running workflows using `Workflow.getVersion()`.
+In a microservices architecture, a single business operation (placing an order) spans multiple services. The **Saga pattern** manages this as a sequence of local transactions, each with a **compensating action** that undoes its effect on failure.
 
-## Project modules
+Temporal orchestrates the saga — the `OrderWorkflow` drives each step and automatically runs compensations in reverse order if any step fails:
 
-- `common`: shared workflow/activity contracts, DTOs, and task queue constants.
-- `order-service` (port `8080`): starts workflows and hosts the `OrderWorkflow` implementation.
-- `payment-service` (port `8081`): payment activity worker.
-- `inventory-service` (port `8082`): inventory reserve/cancel activity worker.
-- `logistics-service` (port `8083`): shipment creation activity worker.
-- `load-testing`: Gatling load tests for capacity/throughput testing of the workflow pipeline.
-- `temporal-local/docker-compose.yml`: local Temporal + Postgres + Temporal UI setup.
-
-## Prerequisites
-
-- Java `21`
-- Maven `3.9+`
-- Docker Desktop (or Docker Engine) with Compose support
-- Open ports: `7233` (Temporal gRPC), `8088` (Temporal UI), `8080-8083` (services)
-
-## Run locally
-
-### 1) Start Temporal locally (Docker Compose)
-
-```bash
-cd temporal-local
-docker compose up -d
+```
+                          ┌─────────────────────────────────────────────────────────────────────┐
+                          │              OrderWorkflow  (Temporal Saga)                         │
+                          │                                                                     │
+  POST /orders ──▶        │   ┌───────────┐     ┌────────────┐    ┌─────────┐    ┌─────────────┐
+                          │   │ Inventory  │──▶ │ Fraud Check│──▶ │ Payment │──▶ │  Shipment   │──▶ SUCCESS
+                          │   │ (reserve)  │    │ + Approval │    │ (charge)│    │  (create)   │
+                          │   └─────┬──────┘    └─────┬──────┘    └────┬────┘    └─────────────┘
+                          │         │                 │                │                        │
+                          │   On failure, compensations run in reverse:                         │
+                          │         │                 │                │                        │
+                          │    cancel reservation     │          refund payment                 │
+                          └─────────────────────────────────────────────────────────────────────┘
 ```
 
-Optional check:
+**Why Temporal instead of event-driven choreography?**
+
+| Concern | Choreography (events) | Temporal Orchestration |
+|---|---|---|
+| Compensation logic | Scattered across services | Centralized in `OrderWorkflowImpl` via `Saga` class |
+| Failure visibility | Requires tracing across event logs | Single workflow history in Temporal UI |
+| Retry / timeout | Each service implements its own | Declarative via `ActivityOptions` |
+| Human-in-the-loop | Complex — external state + polling | Built-in — `Workflow.await()` + Signals |
+
+## Modules
+
+| Module | Port | Role |
+|---|---|---|
+| `common` | — | Shared workflow/activity interfaces, DTOs, task queue constants |
+| `order-service` | 8080 | REST API + `OrderWorkflow` saga orchestrator + fraud check activity |
+| `inventory-service` | 8082 | `InventoryActivity` — reserve / cancel stock |
+| `payment-service` | 8081 | `PaymentActivity` — charge / refund |
+| `logistics-service` | 8083 | `ShippingActivity` — create shipment |
+| `load-testing` | — | Gatling performance tests (smoke / default / stress profiles) |
+| `temporal-local/` | 7233, 8088 | Docker Compose: Temporal Server + PostgreSQL + Temporal UI |
+
+## Quick Start
+
+**Prerequisites:** Java 21, Maven 3.9+, Docker
 
 ```bash
-docker compose ps
-```
+# 1. Start Temporal
+cd temporal-local && docker compose up -d
 
-Temporal endpoints:
+# 2. Bootstrap (once after cloning)
+mvn -N install && mvn -pl common install -DskipTests
 
-- gRPC: `127.0.0.1:7233`
-- UI: `http://localhost:8088`
-
-### 2) Bootstrap Maven (run once after cloning)
-
-The parent POM and `common` module must be installed into your local Maven repository before running any individual service. From the repository root:
-
-```bash
-# Step 1 — install the root/parent POM only (no child modules)
-mvn -N install
-
-# Step 2 — install the shared common module
-mvn -pl common install -DskipTests
-```
-
-You only need to repeat this if you change `common` or the parent `pom.xml`.
-
-### 3) Start each service (separate terminals)
-
-From the repository root:
-
-```bash
+# 3. Start services (each in a separate terminal)
 mvn -pl order-service spring-boot:run
-```
-
-```bash
-mvn -pl payment-service spring-boot:run
-```
-
-```bash
 mvn -pl inventory-service spring-boot:run
-```
-
-```bash
+mvn -pl payment-service spring-boot:run
 mvn -pl logistics-service spring-boot:run
-```
 
-### 4) Start an order workflow
-
-```bash
+# 4. Place an order
 curl -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
-  -d '{"orderId":"ORD-001","customerId":"CUST-1","productId":"PROD-001","quantity":2,"amount":900.99,"shippingAddress":"123 Main St"}'
+  -d '{"orderId":"ORD-001","customerId":"CUST-1","productId":"PROD-001","quantity":2,"amount":500,"shippingAddress":"123 Main St"}'
+
+# 5. Get result
+curl http://localhost:8080/orders/order-ORD-001?timeout=10
 ```
 
-The response returns workflow identifiers immediately (async start), for example:
+**Temporal UI:** http://localhost:8088
 
-```json
-{"workflowId":"order-ORD-001","runId":"...","status":"STARTED"}
-```
+## Saga Compensation in Action
 
-### 5) Fetch workflow result
+Force failures to see compensations:
+
+| Scenario | Payload tweak | What happens |
+|---|---|---|
+| Payment failure | `"amount": 0` | Inventory reservation is cancelled |
+| Shipment failure | `"shippingAddress": ""` | Payment is refunded → reservation is cancelled |
+| Fraud rejection | `"amount": 9999` | Auto-rejected by fraud check → reservation is cancelled |
+
+## Human-in-the-Loop
+
+Orders between $1,001–$5,000 trigger a `NEEDS_REVIEW` fraud decision. The workflow **durably pauses** — no thread, no memory consumed — and waits for a human signal:
 
 ```bash
-curl http://localhost:8080/orders/ORD-001
+# Place order requiring review
+curl -X POST http://localhost:8080/orders -H "Content-Type: application/json" \
+  -d '{"orderId":"ORD-R1","customerId":"CUST-1","productId":"PROD-001","quantity":1,"amount":2500,"shippingAddress":"123 Main St"}'
 ```
 
-## Explore failure and compensation behavior
-
-Try these payload tweaks to observe saga rollback paths:
-
-- Set `amount` to `0` or negative to force payment failure.
-- Set `shippingAddress` to blank to force shipment failure.
-
-In those cases, `OrderWorkflowImpl` triggers compensations (for example refund payment and/or cancel inventory reservation).
-
----
-
-## Human-in-the-Loop (Fraud Review)
-
-The workflow now includes an automated **fraud check** step after inventory reservation. Depending on the order amount, the fraud check returns one of three decisions:
-
-| Order Amount       | Fraud Decision   | Behavior                                           |
-|--------------------|------------------|----------------------------------------------------|
-| ≤ $1,000           | `APPROVED`       | Auto-approved, proceeds to payment immediately     |
-| $1,001 – $5,000    | `NEEDS_REVIEW`   | **Workflow pauses** – waits for human signal        |
-| > $5,000           | `REJECTED`       | Auto-rejected, saga compensations run              |
-
-### How it works
-
-1. **Workflow pauses** – When fraud check returns `NEEDS_REVIEW`, the workflow calls `Workflow.await(Duration.ofHours(24), () -> approvalDecision != null)`. This is a **durable sleep** — the workflow survives server restarts and worker downtime.
-
-2. **Human sends a Signal** – A reviewer calls `POST /orders/{workflowId}/approve` with an approval decision. Temporal delivers the signal to the paused workflow, which resumes execution.
-
-3. **Timeout protection** – If no signal arrives within 24 hours, the order is auto-rejected and saga compensations run.
-
-4. **Query status** – At any time, `GET /orders/{workflowId}/approval-status` returns the current state via a Temporal Query.
-
-### Try the human-in-the-loop flow
-
-**Step 1 — Place a high-value order (triggers NEEDS_REVIEW):**
+```bash
+# Check status (WAITING_FOR_APPROVAL)
+curl http://localhost:8080/orders/order-ORD-R1/approval-status
+```
 
 ```bash
-curl -X POST http://localhost:8080/orders \
+# Approve
+curl -X POST http://localhost:8080/orders/order-ORD-R1/approve \
   -H "Content-Type: application/json" \
-  -d '{"orderId":"ORD-REVIEW-001","customerId":"CUST-1","productId":"PROD-001","quantity":2,"amount":2500.00,"shippingAddress":"123 Main St"}'
+  -d '{"approved": true, "reviewerNote": "Verified"}'
 ```
-
-**Step 2 — Check the approval status (should be WAITING_FOR_APPROVAL):**
 
 ```bash
-curl http://localhost:8080/orders/order-ORD-REVIEW-001/approval-status
-```
-
-```json
-{"workflowId":"order-ORD-REVIEW-001","approvalStatus":"WAITING_FOR_APPROVAL"}
-```
-
-**Step 3a — Approve the order:**
-
-```bash
-curl -X POST http://localhost:8080/orders/order-ORD-REVIEW-001/approve \
+# Or reject
+curl -X POST http://localhost:8080/orders/order-ORD-R1/approve \
   -H "Content-Type: application/json" \
-  -d '{"approved": true, "reviewerNote": "Verified customer identity"}'
+  -d '{"approved": false, "reviewerNote": "Suspicious"}'
 ```
 
-**Step 3b — Or reject the order:**
+If no signal arrives within 24 hours, the order auto-rejects and compensations run.
 
-```bash
-curl -X POST http://localhost:8080/orders/order-ORD-REVIEW-001/approve \
-  -H "Content-Type: application/json" \
-  -d '{"approved": false, "reviewerNote": "Suspected fraudulent activity"}'
-```
+| Amount | Fraud Decision | Behavior |
+|---|---|---|
+| ≤ $1,000 | `APPROVED` | Auto-approved → payment proceeds |
+| $1,001–$5,000 | `NEEDS_REVIEW` | Workflow pauses for human signal |
+| > $5,000 | `REJECTED` | Auto-rejected → compensations run |
 
-**Step 4 — Fetch the final result:**
+## Workflow Versioning
 
-```bash
-curl http://localhost:8080/orders/order-ORD-REVIEW-001
-```
-
-### Try automatic approval (low-value order):
-
-```bash
-curl -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{"orderId":"ORD-AUTO-001","customerId":"CUST-1","productId":"PROD-001","quantity":1,"amount":99.99,"shippingAddress":"123 Main St"}'
-```
-
-This order passes fraud check automatically — no human intervention needed.
-
-### Try automatic rejection (very high-value order):
-
-```bash
-curl -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{"orderId":"ORD-REJECT-001","customerId":"CUST-1","productId":"PROD-001","quantity":1,"amount":9999.99,"shippingAddress":"123 Main St"}'
-```
-
-This order is auto-rejected by the fraud engine and inventory reservation is compensated.
-
----
-
-## Workflow Versioning with `Workflow.getVersion()`
-
-The fraud-check step was introduced using Temporal's **workflow versioning** mechanism to ensure **zero-downtime deployment** without breaking already-running workflows.
-
-### How it works
+New workflow steps are introduced safely using `Workflow.getVersion()` — already-running workflows replay the old path, new workflows execute the new path:
 
 ```java
-    int version = Workflow.getVersion("FraudCheckStep", Workflow.DEFAULT_VERSION, 1);
-    
-    if (version >= 1) {
-        // V1: new workflows execute fraud check + human approval
-    } else {
-        // V0: already-running workflows skip this block entirely
-    }
+int version = Workflow.getVersion("FraudCheckStep", Workflow.DEFAULT_VERSION, 1);
+if (version >= 1) { /* V1: fraud check + human approval */ }
+else               { /* V0: skip — legacy workflows */   }
 ```
 
-**Key concepts:**
+This enables zero-downtime deployments without breaking in-flight workflows.
 
-| Concept | Description |
-|---------|-------------|
-| `changeId` | A unique string (`"FraudCheckStep"`) that identifies this specific change |
-| `minSupported` | `Workflow.DEFAULT_VERSION` – old workflows that have never seen this version marker |
-| `maxSupported` | `1` – the newest version of this code path |
+## Load Testing
 
-**What happens during deployment:**
-
-1. **Already-running V0 workflows** — Temporal replays their history and finds no version marker recorded. `getVersion()` returns `DEFAULT_VERSION` (-1), so the fraud-check block is skipped. These workflows complete exactly as they did before.
-
-2. **New V1 workflows** — Temporal records version `1` in the workflow history. `getVersion()` returns `1`, so the fraud-check + human-approval block executes.
-
-3. **Future V2 changes** — When you need another change, add a new `Workflow.getVersion("AnotherChange", ...)` call. Version markers compose — each workflow execution records its own set of version decisions.
-
-### Adding future versions (convention)
-
-```java
-    // Future example: adding a loyalty-points step
-    int loyaltyVersion = Workflow.getVersion("LoyaltyPointsStep", Workflow.DEFAULT_VERSION, 1);
-    if (loyaltyVersion >= 1) {
-        // award loyalty points after successful payment
-    }
-```
-
-Each `getVersion()` call is independent. You can have multiple versioned blocks in the same workflow, and they don't interfere with each other.
-
----
-
-## Workflow sequence diagram (V1)
-
-```
-Client            OrderWorkflow         Inventory   FraudCheck   [Human]     Payment    Shipping
-  │                    │                    │           │            │           │          │
-  │── POST /orders ──▶ │                    │           │            │           │          │
-  │                    │── reserveInventory ▶│          │            │           │          │
-  │                    │◀── reserved ───────│           │            │           │          │
-  │                    │                    │           │            │           │          │
-  │                    │── checkFraud ─────────────────▶│            │           │          │
-  │                    │◀── NEEDS_REVIEW ──────────────│             │           │          │
-  │                    │                    │           │            │           │          │
-  │                    │══ Workflow.await() (paused, durable) ═════▶ │           │          │
-  │                    │                    │           │            │           │          │
-  │── POST /approve ──▶│◀── signal ───────────────────────────────── │           │          │
-  │                    │                    │           │            │           │          │
-  │                    │── processPayment ──────────────────────────────────────▶│          │
-  │                    │◀── paid ───────────────────────────────────────────────│           │
-  │                    │── createShipment ──────────────────────────────────────────────── ▶│
-  │                    │◀── shipped ──────────────────────────────────────────────────────  │
-  │                    │                    │           │            │           │          │
-  │◀── SUCCESS ───────│                    │           │            │           │           │
-```
-
-## Stop local Temporal stack
+The `load-testing` module uses Gatling with three Maven profiles for parallel load:
 
 ```bash
-cd temporal-local
-docker compose down
+mvn -pl load-testing gatling:test -Psmoke     # ~25 workflows, quick sanity check
+mvn -pl load-testing gatling:test              # ~350 workflows, 50+ concurrent
+mvn -pl load-testing gatling:test -Pstress     # ~1,250 workflows, 150+ concurrent
 ```
 
----
+Three injection phases per run: **ramp-up** → **sustained constant rate** → **spike burst**.
 
-## Load Testing with Gatling
+Reports: `open load-testing/target/gatling/orderprocessingsimulation-*/index.html`
 
-The `load-testing` module contains a Gatling simulation that fires bulk orders through the
-**fully-automated** happy path to stress-test the Temporal cluster and all four microservices.
-
-Every order uses `amount = 100` (below the $1,000 fraud-review threshold), so the
-entire saga runs automatically with **no human-in-the-loop signals required**:
-
-```
-Inventory → Fraud Check (auto-APPROVED) → Payment → Shipment → SUCCESS
-```
-
-### What the simulation does
-
-| Step | HTTP Request | Validates |
-|------|-------------|-----------|
-| 1 | `POST /orders` — start workflow (unique UUID orderId) | HTTP 202, `status: STARTED`, captures `workflowId` |
-| 2 | _pause 5 seconds_ — let the workflow complete | — |
-| 3 | `GET /orders/{workflowId}` — fetch final result | HTTP 200, `status: SUCCESS`, `orderId` matches |
-
-### Default load profile
-
-- **30 virtual users** injected at a constant rate over **60 seconds** (0.5 req/sec)
-- Built-in assertions: ≥ 95% success rate, p99 latency for POST < 5 seconds
-
-### Prerequisites
-
-1. **Temporal** must be running:
-    ```bash
-    cd temporal-local && docker compose up -d
-    ```
-
-2. **All four services** must be running (in separate terminals):
-    ```bash
-    mvn -pl order-service spring-boot:run
-    mvn -pl payment-service spring-boot:run
-    mvn -pl inventory-service spring-boot:run
-    mvn -pl logistics-service spring-boot:run
-    ```
-
-### Run the load test
+## Teardown
 
 ```bash
-mvn -pl load-testing gatling:test
+cd temporal-local && docker compose down
 ```
-
-### Override defaults via system properties
-
-```bash
-mvn -pl load-testing gatling:test \
-    -DbaseUrl=http://localhost:8080 \
-    -DtotalRequests=1 \
-    -DdurationSecs=10 \
-    -DpollPauseSecs=10
-```
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `baseUrl` | `http://localhost:8080` | Order-service base URL |
-| `totalRequests` | `30` | Total number of orders to fire |
-| `durationSecs` | `60` | Time window to spread requests over (seconds) |
-| `pollPauseSecs` | `5` | Seconds to wait before polling for the result |
-
-### View the HTML report
-
-After the run completes, open the Gatling report:
-
-```bash
-open load-testing/target/gatling/orderprocessingsimulation-*/index.html
-```
-
-The report includes response time distributions, throughput graphs, and assertion results.
-

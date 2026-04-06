@@ -15,71 +15,64 @@ import static io.gatling.javaapi.core.CoreDsl.*;
 import static io.gatling.javaapi.http.HttpDsl.*;
 
 /**
- * Gatling load test — fires orders through the fully-automated happy path.
+ * Gatling load test — measures Temporal workflow throughput under parallel load.
  *
- * <h3>What it does</h3>
+ * <h3>Three load phases run back-to-back</h3>
  * <ol>
- *   <li>{@code POST /orders} — starts a workflow with a unique UUID-based orderId</li>
- *   <li>Pauses to let workflows begin processing</li>
- *   <li>{@code GET /orders/{workflowId}?timeout=30} — blocks server-side until the
- *       workflow completes (or 30 s expires), then verifies {@code status: SUCCESS}</li>
+ *   <li><b>Ramp-up</b>  — linearly add users from 0 → {@code rampUsers} over {@code rampSecs}</li>
+ *   <li><b>Sustained</b> — inject at a constant {@code steadyRate} users/sec for {@code steadySecs}</li>
+ *   <li><b>Spike</b>     — fire {@code spikeUsers} all at once (true parallel burst)</li>
  * </ol>
  *
- * <p>Every order uses {@code amount = 100}, which is safely below the $1,000
- * fraud-review threshold, so the entire saga runs fully automated:
- * <pre>
- *   Inventory → Fraud Check (auto-APPROVED) → Payment → Shipment → SUCCESS
- * </pre>
+ * <p>Every order uses {@code amount = 100} (below the $1,000 fraud-review threshold),
+ * so the full saga runs fully automated — no human signal required.
  *
- * <h3>Default load profile</h3>
- * 30 requests spread evenly over 60 seconds (0.5 req/sec).
+ * <h3>Profiles</h3>
+ * <pre>
+ *   # Smoke (quick sanity check — ~25 workflows)
+ *   mvn -pl load-testing gatling:test \
+ *       -DrampUsers=5 -DrampSecs=5 -DsteadyRate=2 -DsteadySecs=5 -DspikeUsers=5
+ *
+ *   # Default (moderate — ~350 workflows, up to 50+ concurrent)
+ *   mvn -pl load-testing gatling:test
+ *
+ *   # Stress (heavy — ~1,250 workflows, up to 100+ concurrent)
+ *   mvn -pl load-testing gatling:test \
+ *       -DrampUsers=50 -DrampSecs=10 -DsteadyRate=20 -DsteadySecs=60 -DspikeUsers=50
+ * </pre>
  *
  * <h3>Prerequisites</h3>
- * <ul>
- *   <li>Temporal must be running  ({@code cd temporal-local && docker compose up -d})</li>
- *   <li>All four services must be running (order, payment, inventory, logistics)</li>
- * </ul>
- *
- * <h3>Run</h3>
- * <pre>
- *   mvn -pl load-testing gatling:test
- * </pre>
- *
- * <h3>Override defaults</h3>
- * <pre>{@code
- *   mvn -pl load-testing gatling:test \
- *       -DbaseUrl=http://localhost:8080 \
- *       -DtotalRequests=50 \
- *       -DdurationSecs=120 \
- *       -DpollPauseSecs=10
- * }</pre>
- *
- * <h3>Reports</h3>
- * HTML report is written to {@code load-testing/target/gatling/<run-folder>/index.html}.
+ * Temporal + all four services must be running.
  */
 public class OrderProcessingSimulation extends Simulation {
 
-    // ── Tunables (overridable via -D system properties) ─────────────────────
+    // ── Tunables (all overridable via -D) ───────────────────────────────────
 
-    private static final String BASE_URL        = System.getProperty("baseUrl",       "http://localhost:8080");
-    private static final int    TOTAL_REQUESTS  = Integer.getInteger("totalRequests",  30);
-    private static final int    DURATION_SECS   = Integer.getInteger("durationSecs",   60);
-    private static final int    POLL_PAUSE_SECS = Integer.getInteger("pollPauseSecs",  10);
-    private static final int    GET_TIMEOUT     = Integer.getInteger("getTimeout",     30);
+    private static final String BASE_URL    = System.getProperty("baseUrl", "http://localhost:8080");
 
-    // ── HTTP protocol shared by all requests ────────────────────────────────
+    // Phase 1 — Ramp-up
+    private static final int RAMP_USERS     = Integer.getInteger("rampUsers",  30);
+    private static final int RAMP_SECS      = Integer.getInteger("rampSecs",   15);
+
+    // Phase 2 — Sustained constant rate
+    private static final int STEADY_RATE    = Integer.getInteger("steadyRate", 10);   // users/sec
+    private static final int STEADY_SECS    = Integer.getInteger("steadySecs", 30);
+
+    // Phase 3 — Spike burst
+    private static final int SPIKE_USERS    = Integer.getInteger("spikeUsers", 20);
+
+    // Server-side result wait
+    private static final int GET_TIMEOUT    = Integer.getInteger("getTimeout", 30);
+
+    // ── HTTP protocol ───────────────────────────────────────────────────────
 
     private final HttpProtocolBuilder httpProtocol = http
             .baseUrl(BASE_URL)
             .acceptHeader("application/json")
             .contentTypeHeader("application/json");
 
-    // ── Feeder: infinite stream of unique order payloads ────────────────────
+    // ── Feeder — infinite unique order payloads ─────────────────────────────
 
-    /**
-     * Each call yields a fresh map with a UUID-based orderId so that every
-     * virtual user gets its own unique Temporal workflow.
-     */
     private static Iterator<Map<String, Object>> orderFeeder() {
         return Stream.generate((Supplier<Map<String, Object>>) () -> {
             String uid = UUID.randomUUID().toString().substring(0, 8).toUpperCase();
@@ -88,7 +81,7 @@ public class OrderProcessingSimulation extends Simulation {
                     "customerId",      "CUST-LOAD-" + uid,
                     "productId",       "PROD-001",
                     "quantity",        1,
-                    "amount",          100,          // below $1,000 → fraud auto-approve
+                    "amount",          100,
                     "shippingAddress", "123 Load Test Ave"
             );
         }).iterator();
@@ -99,7 +92,7 @@ public class OrderProcessingSimulation extends Simulation {
     private final ScenarioBuilder placeAndVerifyOrder = scenario("Place & Verify Order")
             .feed(orderFeeder())
 
-            // ── 1. Start the order workflow (async — returns 202 immediately) ──
+            // 1. Start the workflow (returns 202 immediately)
             .exec(
                     http("POST /orders")
                             .post("/orders")
@@ -120,14 +113,10 @@ public class OrderProcessingSimulation extends Simulation {
                             .check(jsonPath("$.status").is("STARTED"))
             )
 
-            // ── 2. Initial pause — give workflows a head start ─────────────────
-            .pause(Duration.ofSeconds(POLL_PAUSE_SECS))
+            // 2. Random short pause (2–5 s) — keeps users overlapping
+            .pause(Duration.ofSeconds(2), Duration.ofSeconds(5))
 
-            // ── 3. Fetch the result (server blocks until workflow completes) ───
-            //  The controller calls getResult(timeout, SECONDS) which blocks
-            //  server-side until the workflow finishes or the timeout expires.
-            //  - 200 = workflow completed  →  validate status=SUCCESS
-            //  - 202 = still running       →  counted as a failure (timeout too short)
+            // 3. Verify workflow completed (server blocks up to getTimeout seconds)
             .exec(
                     http("GET /orders/{workflowId}")
                             .get("/orders/#{workflowId}?timeout=" + GET_TIMEOUT)
@@ -140,18 +129,21 @@ public class OrderProcessingSimulation extends Simulation {
     {
         setUp(
                 placeAndVerifyOrder.injectOpen(
-                        // e.g. 30 users / 60 s = 0.5 users-per-second, constant
-                        constantUsersPerSec((double) TOTAL_REQUESTS / DURATION_SECS)
-                                .during(Duration.ofSeconds(DURATION_SECS))
+
+                        // Phase 1 — Ramp-up: linearly add users (warm-up)
+                        rampUsers(RAMP_USERS).during(Duration.ofSeconds(RAMP_SECS)),
+
+                        // Phase 2 — Sustained: constant parallel injection rate
+                        constantUsersPerSec(STEADY_RATE).during(Duration.ofSeconds(STEADY_SECS)),
+
+                        // Phase 3 — Spike: all users start at the same instant
+                        atOnceUsers(SPIKE_USERS)
                 )
         )
         .protocols(httpProtocol)
         .assertions(
-                // ≥ 95 % of all HTTP requests must succeed
                 global().successfulRequests().percent().gt(95.0),
-                // p99 latency for the POST must stay under 5 s
                 details("POST /orders").responseTime().percentile(99.0).lt(5000)
         );
     }
 }
-
